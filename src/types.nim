@@ -1,5 +1,5 @@
 import std/[options, tables, httpcore, times]
-
+import std/strutils
 type
   InjectionType* = enum
     Union = "Union",
@@ -7,11 +7,17 @@ type
     Blind = "Blind",
     TimeBased = "TimeBased"
     
+  ParamRelation* = object
+    name*: string
+    value*: string
+    parent*: Option[string]  # Track parent parameter if nested
+    
   ScanTarget* = ref object
     url*: string
     httpMethod*: HttpMethod
     headers*: HttpHeaders
     params*: TableRef[string, string]
+    paramRelations*: seq[ParamRelation]  # Add this field
     data*: string
     delay*: Duration  # Duration type for delay
     timeout*: Duration  # Duration type for timeout
@@ -23,15 +29,33 @@ type
     parameter*: string
     details*: string
 
+proc parseUrlParams*(url: string): TableRef[string, string] =
+  result = newTable[string, string]()
+  let parts = url.split('?')
+  if parts.len > 1:
+    let paramString = parts[1]
+    for param in paramString.split('&'):
+      let keyVal = param.split('=')
+      if keyVal.len == 2:
+        # Store both the parameter and its value
+        result[keyVal[0]] = keyVal[1]
+        # If parameter contains nested values (like mprod=0), store them too
+        if keyVal[1].contains({'/', '&'}):
+          for nestedParam in keyVal[1].split({'/', '&'}):
+            let nestedKeyVal = nestedParam.split('=')
+            if nestedKeyVal.len == 2:
+              result[nestedKeyVal[0]] = nestedKeyVal[1]
+
 proc newScanTarget*(url: string, httpMethod: HttpMethod): ScanTarget =
   new(result)
-  result.url = url
+  result.url = url.split('?')[0]  # Store base URL without params
   result.httpMethod = httpMethod
-  result.headers = newHttpHeaders()  # Initialize with newHttpHeaders from httpcore
-  result.params = newTable[string, string]()
+  result.headers = newHttpHeaders()
+  result.params = parseUrlParams(url)  # Parse URL params automatically
+  result.paramRelations = @[]
   result.data = ""
-  result.delay = initDuration(milliseconds = 0)  # No delay by default
-  result.timeout = initDuration(milliseconds = 10000)  # Default 10 second timeout
+  result.delay = initDuration(milliseconds = 0)
+  result.timeout = initDuration(milliseconds = 10000)
 
 proc setDelay*(target: var ScanTarget, milliseconds: int) =
   target.delay = initDuration(milliseconds = milliseconds)

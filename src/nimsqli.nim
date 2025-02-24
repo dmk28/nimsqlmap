@@ -1,4 +1,4 @@
-import std/[asyncdispatch, httpclient, uri, strutils, options, parseopt, httpcore]
+import std/[asyncdispatch, httpclient, uri, strutils, options, parseopt, httpcore, tables]
 from ./types import ScanTarget, ScanResult, InjectionType, newScanTarget
 from ./scanner import scanParameter
 from ./utils import addHeader, setDelay
@@ -9,14 +9,27 @@ NimSQLi - SQL Injection Scanner
 Usage: nimsqli [options] <url>
 
 Options:
-  -h, --help            Show this help message
-  -m, --method=METHOD   HTTP method (GET, POST, PUT, DELETE)
-  -p, --param=PARAM     Parameter to test
-  -d, --delay=MSEC     Delay between requests in milliseconds (default: 0)
-  -t, --timeout=MSEC   Request timeout in milliseconds (default: 10000)
-  --data=DATA          POST data
-  --header=HEADER      Add custom header (format: "Name: Value")
+  -h, --help              Show this help message
+  -m, --method=METHOD     HTTP method (GET, POST, PUT, DELETE)
+  -p, --param=PARAM       Parameter to test for SQL injection
+  -d, --delay=MSEC        Delay between requests in milliseconds (default: 0)
+  -t, --timeout=MSEC      Request timeout in milliseconds (default: 10000)
+  --data=DATA            POST data
+  --header=HEADER        Add custom header (format: "Name: Value")
+
+Examples:
+  nimsqli --method=GET --param=id -d 10 "http://example.com/page.php?id=1"
+  nimsqli -p=id --method=GET "http://example.com/page.php?id=1"
 """
+
+proc matchesWildcard(str, pattern: string): bool =
+  if pattern == "*":
+    return true
+  if pattern.endsWith("*"):
+    return str.startsWith(pattern[0..^2])
+  if pattern.startsWith("*"):
+    return str.endsWith(pattern[1..^1])
+  return str == pattern
 
 proc main() {.async.} =
   var
@@ -42,31 +55,35 @@ proc main() {.async.} =
         showHelp()
         quit(0)
       of "m", "method":
-        p.next()  # Get the value after -m
-        if p.kind == cmdArgument:
-          let methodStr = p.key.toUpperAscii()
-          echo "Method string: '", methodStr, "'"  # Debug
-          case methodStr
-          of "GET": 
-            echo "Setting method to GET"  # Debug
-            httpMethod = HttpGet
-          of "POST": 
-            echo "Setting method to POST"  # Debug
-            httpMethod = HttpPost
-          of "PUT": 
-            echo "Setting method to PUT"  # Debug
-            httpMethod = HttpPut
-          of "DELETE": 
-            echo "Setting method to DELETE"  # Debug
-            httpMethod = HttpDelete
-          else:
-            echo "Error: Invalid HTTP method '", methodStr, "'. Supported methods are: GET, POST, PUT, DELETE"
-            quit(1)
+        let methodStr = p.val.toUpperAscii()  # Use p.val instead of getting next token
+        echo "Method string: '", methodStr, "'"  # Debug
+        case methodStr
+        of "GET": 
+          echo "Setting method to GET"  # Debug
+          httpMethod = HttpGet
+        of "POST": 
+          echo "Setting method to POST"  # Debug
+          httpMethod = HttpPost
+        of "PUT": 
+          echo "Setting method to PUT"  # Debug
+          httpMethod = HttpPut
+        of "DELETE": 
+          echo "Setting method to DELETE"  # Debug
+          httpMethod = HttpDelete
+        else:
+          echo "Error: Invalid HTTP method '", methodStr, "'. Supported methods are: GET, POST, PUT, DELETE"
+          quit(1)
       of "p", "param":
-        p.next()  # Get the value after -p
-        if p.kind == cmdArgument:
-          param = p.key
-          echo "Set param to: ", param  # Debug
+        if p.val.len > 0:  # If value is provided with --param=value
+          param = p.val
+        else:  # If value is provided as next argument
+          p.next()
+          if p.kind == cmdArgument:
+            param = p.key
+          else:
+            echo "Error: -p/--param requires a value (e.g., -p id or --param=id)"
+            quit(1)
+        echo "Set param to: ", param  # Debug
       of "d", "delay":
         p.next()  # Get the value after -d
         if p.kind == cmdArgument:
@@ -108,15 +125,37 @@ proc main() {.async.} =
     target.data = data
     
   target.setDelay(requestDelay)
-  let result = await scanParameter(target, param)
-  
-  if result.vulnerable:
-    echo "VULNERABLE!"
-    echo "Parameter: ", result.parameter
-    echo "Payload: ", result.payload
-    echo "Details: ", result.details
-  else:
-    echo "No SQL injection vulnerability detected."
+  if param == "*":
+    echo "Testing all parameters..."
+    if target.params.len == 0:
+      echo "No parameters found in URL. Try adding parameters like: ?param=value"
+      quit(1)
+    for paramName in target.params.keys():
+      echo "Testing parameter: ", paramName
+      let result = await scanParameter(target, paramName)
+      if result.vulnerable:
+        echo "VULNERABLE!"
+        echo "Parameter: ", result.parameter
+        echo "Payload: ", result.payload
+        echo "Details: ", result.details
+  elif param.contains('*'):
+    echo "Testing parameters matching pattern: ", param
+    if target.params.len == 0:
+      echo "No parameters found in URL. Try adding parameters like: ?param=value"
+      quit(1)
+    var foundMatch = false
+    for paramName in target.params.keys():
+      if matchesWildcard(paramName, param):
+        foundMatch = true
+        echo "Testing parameter: ", paramName
+        let result = await scanParameter(target, paramName)
+        if result.vulnerable:
+          echo "VULNERABLE!"
+          echo "Parameter: ", result.parameter
+          echo "Payload: ", result.payload
+          echo "Details: ", result.details
+    if not foundMatch:
+      echo "No parameters found matching pattern: ", param
   
 when isMainModule:
   try:
